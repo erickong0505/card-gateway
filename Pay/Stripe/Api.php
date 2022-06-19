@@ -46,7 +46,7 @@ class Api implements ApiInterface
             $config['gateway'] = 'https://api.stripe.com';
         }
         if (!isset($config['currency'])) {
-            $config['currency'] = 'usd';
+            $config['currency'] = 'myr';
         }
         if (!isset($config['api_key'])) {
             throw new \Exception('请填写API秘钥 [api_key]');
@@ -59,7 +59,7 @@ class Api implements ApiInterface
         $amount_currency = $this->getCurrency($amount_cent, $config['currency']);
 
         $data = [
-            'type' => $config['payway'], // alipay / wechat
+            'type' => $config['payway'], // card / fpx
             'amount' => $amount_currency,
             'currency' => $config['currency'],
             'metadata' => [
@@ -82,7 +82,7 @@ class Api implements ApiInterface
         $source = @json_decode($response, true);
         if (!$source || !isset($source['id']) || @$source['status'] !== 'pending') {
             Log::error('Pay.Stripe.goPay.order, request failed, response: ' . $response);
-            throw new \Exception(@$source['message'] ?? '获取付款信息超时, 请刷新重试');
+            throw new \Exception(@$source['message'] ?? 'Request time out, refresh the page & try again.');
         }
 
 
@@ -97,14 +97,14 @@ class Api implements ApiInterface
         $order->saveOrFail();
 
         switch ($config['payway']) {
-            case 'alipay':
+            case 'card':
                 header('Location: ' . $source['redirect']['url']);
                 break;
-            case 'wechat':
-                header('Location: ' . $source['wechat']['qr_code_url']);
+            case 'fpx':
+                header('Location: ' . $source['fpx']['qr_code_url']);
                 break;
             default:
-                throw new \Exception('支付方式错误');
+                throw new \Exception('Invalid payment method');
         }
         exit;
     }
@@ -133,7 +133,7 @@ class Api implements ApiInterface
         }
 
         if ($source['status'] === 'chargeable') {
-            // 支付成功, 钱到了临时账户(source)里面, 从临时账户转账到主账户
+            // Payment Success, 钱到了临时账户(source)里面, 从临时账户转账到主账户
 
             // 说明尚未处理过此订单, 因此 $order->pay_trade_no 一定是个数组
             assert(is_array($currency_info));
@@ -165,9 +165,9 @@ class Api implements ApiInterface
             }
 
 
-            $amount_cny = (int)round(($order->paid / $currency_info['currency_amount']) * $source['amount']);
-            // Log::error('Pay.Stripe.verify, cny: ' . $amount_cny);
-            $successCallback($order->order_no, $amount_cny, $charge['id']);
+            $amount_myr = (int)round(($order->paid / $currency_info['currency_amount']) * $source['amount']);
+            // Log::error('Pay.Stripe.verify, myr: ' . $amount_myr);
+            $successCallback($order->order_no, $amount_myr, $charge['id']);
             return true;
 
         } elseif ($source['status'] === 'consumed') {
@@ -262,9 +262,9 @@ class Api implements ApiInterface
                         return false;
                     }
 
-                    $amount_cny = (int)round(($order->paid / $currency_info['currency_amount']) * $source['amount']);
-                    // Log::error('Pay.Stripe.verify, cny: ' . $amount_cny);
-                    $successCallback($order->order_no, $amount_cny, $charge['id']);
+                    $amount_myr = (int)round(($order->paid / $currency_info['currency_amount']) * $source['amount']);
+                    // Log::error('Pay.Stripe.verify, myr: ' . $amount_myr);
+                    $successCallback($order->order_no, $amount_myr, $charge['id']);
                     return true;
 
                 } else {
@@ -311,31 +311,32 @@ class Api implements ApiInterface
     }
 
 
-    function getCurrency($cny, $currency = 'usd')
+    function getCurrency($myr, $currency = 'usd')
     {
-        if ($currency === 'cny') {
-            return $cny;
+        if ($currency === 'myr') {
+            return $myr;
         }
 
         $ZCcyNbr_table = [
-            'aud' => '澳大利亚元',
-            'cad' => '加拿大元',
-            'eur' => '欧元',
-            'gbp' => '英镑',
-            'hkd' => '港币',
-            'jpy' => '日元',
-            'sgd' => '新加坡元',
-            'usd' => '美元',
+            'aud' => 'Australian Dollar',
+            'cad' => 'Canada Dollar',
+            'eur' => 'Euro Pound',
+            'gbp' => 'UK Pound',
+            'hkd' => 'Hong Kong Dollar',
+            'cny' => 'China Yuan',
+            'jpy' => 'Japanese Yuan',
+            'sgd' => 'Singapore Dollar',
+            'usd' => 'US Dollar',
         ];
 
         if (!isset($ZCcyNbr_table[$currency])) {
-            throw new \Exception('不支持的汇率, 目前支持: ' . join(',', array_keys($ZCcyNbr_table)));
+            throw new \Exception('Unsupported currency, list of supported currencies: ' . join(',', array_keys($ZCcyNbr_table)));
         }
 
         $response = CurlRequest::get('https://m.cmbchina.com/api/rate/getfxrate');
         $data = @json_decode($response, true);
         if (!$data || !isset($data['data'])) {
-            throw new \Exception('获取汇率失败');
+            throw new \Exception('Currency Acquire Error!');
         }
 
         $rate = 99999;
@@ -353,19 +354,19 @@ class Api implements ApiInterface
             throw new \Exception('获取汇率失败#2');
         }
 
-        return (int)ceil($cny * $rate); // 向上取整, 1428.12 => 1429
+        return (int)ceil($myr * $rate); // 向上取整, 1428.12 => 1429
     }
 
     /**
      * 退款操作
-     * @param array $config 支付渠道配置
-     * @param string $order_no 订单号
-     * @param string $pay_trade_no 支付渠道流水号
-     * @param int $amount_cent 金额/分
-     * @return true|string true 退款成功  string 失败原因
+     * @param array $config Payment Channel
+     * @param string $order_no Order Number
+     * @param string $pay_trade_no Payment Number
+     * @param int $amount_cent Amount/Cent
+     * @return true|string true Refund Success  string Error Reason
      */
     function refund($config, $order_no, $pay_trade_no, $amount_cent)
     {
-        return '此支付渠道不支持发起退款, 请手动操作';
+        return 'Cannot perform refund for the selected payment channel, please conduct manually';
     }
 }
